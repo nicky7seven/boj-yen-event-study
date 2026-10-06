@@ -1,6 +1,6 @@
 """
-How do the yen and JGBs react to Bank of Japan rate hikes?
-Step 1 - event study around every hike since March 2024.
+How do the yen and JGBs react to Bank of Japan decisions?
+Event study around every BoJ policy meeting since March 2024 (hikes AND holds).
 
 Outputs (written next to this script)
   results/boj_event_study.csv    full-precision results table
@@ -10,7 +10,7 @@ Outputs (written next to this script)
 
 Sign conventions
   USD/JPY is yen per dollar. POSITIVE % = YEN WEAKER.
-  JGB 10y change is in basis points. POSITIVE bp = yields UP (bond prices down).
+  JGB yield changes are in basis points. POSITIVE bp = yields UP (bond prices down).
 """
 from io import StringIO
 from pathlib import Path
@@ -21,6 +21,7 @@ import yfinance as yf
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.patches import Patch
 
 HERE = Path(__file__).resolve().parent
 DATA = HERE / "data"
@@ -28,23 +29,42 @@ OUT = HERE / "results"
 DATA.mkdir(exist_ok=True)
 OUT.mkdir(exist_ok=True)
 
-START = "2023-10-01"   # extra history before the first hike for the volatility baseline
+START = "2023-10-01"   # extra history before the first meeting for the volatility baseline
 REFRESH = True         # set False to rerun from the cached CSVs in data/
+PRE_DAYS = 10          # run-up window: t-1-PRE_DAYS -> t-1 (about two weeks before the meeting)
 
 # ---- Events ----------------------------------------------------------------
-# BoJ hikes since normalisation began. Check each against boj.or.jp.
-hikes = pd.DataFrame(
+# Every BoJ Monetary Policy Meeting since March 2024. Date = the decision day (second day
+# of the meeting). Dates from boj.or.jp/en/mopo/mpmsche_minu/. Check decisions against
+# each meeting's statement on boj.or.jp.
+meetings = pd.DataFrame(
     [
-        ("2024-03-19", "Ended negative rates", -0.10, 0.00),  # -0.1% to a 0-0.1% range, ~10bp
-        ("2024-07-31", "0.1% to 0.25%", 0.10, 0.25),
-        ("2025-01-24", "0.25% to 0.5%", 0.25, 0.50),
-        ("2025-12-19", "0.5% to 0.75%", 0.50, 0.75),
-        ("2026-06-16", "0.75% to 1.0%", 0.75, 1.00),
-        ("2026-09-18", "1.0% to 1.25%", 1.00, 1.25),
+        # date,        decision, change (bp), policy rate after
+        ("2024-03-19", "Hike", 10, "0-0.1%"),   # ended negative rates (-0.1% -> 0-0.1%)
+        ("2024-04-26", "Hold", 0, "0-0.1%"),
+        ("2024-06-14", "Hold", 0, "0-0.1%"),
+        ("2024-07-31", "Hike", 15, "0.25%"),
+        ("2024-09-20", "Hold", 0, "0.25%"),
+        ("2024-10-31", "Hold", 0, "0.25%"),
+        ("2024-12-19", "Hold", 0, "0.25%"),
+        ("2025-01-24", "Hike", 25, "0.5%"),
+        ("2025-03-19", "Hold", 0, "0.5%"),
+        ("2025-05-01", "Hold", 0, "0.5%"),
+        ("2025-06-17", "Hold", 0, "0.5%"),
+        ("2025-07-31", "Hold", 0, "0.5%"),
+        ("2025-09-19", "Hold", 0, "0.5%"),
+        ("2025-10-30", "Hold", 0, "0.5%"),
+        ("2025-12-19", "Hike", 25, "0.75%"),
+        ("2026-01-23", "Hold", 0, "0.75%"),
+        ("2026-03-19", "Hold", 0, "0.75%"),
+        ("2026-04-28", "Hold", 0, "0.75%"),
+        ("2026-06-16", "Hike", 25, "1.0%"),
+        ("2026-07-31", "Hold", 0, "1.0%"),
+        ("2026-09-18", "Hike", 25, "1.25%"),
     ],
-    columns=["Date", "Decision", "Rate before", "Rate after"],
+    columns=["Date", "Decision", "Change (bp)", "Policy rate after"],
 )
-hikes["Date"] = pd.to_datetime(hikes["Date"])
+meetings["Date"] = pd.to_datetime(meetings["Date"])
 
 
 # ---- Data: USD/JPY ---------------------------------------------------------
@@ -84,7 +104,8 @@ def load_usdjpy_yahoo() -> pd.Series:
     return pd.read_csv(cache, index_col="Date", parse_dates=True)["USDJPY"]
 
 
-# ---- Data: 10y JGB yield from Japan's Ministry of Finance ------------------
+# ---- Data: JGB yields from Japan's Ministry of Finance ---------------------
+# 2Y = best free read on near-term BoJ expectations. 10Y = longer-run view (plus fiscal and global factors).
 MOF_URLS = [
     "https://www.mof.go.jp/english/policy/jgbs/reference/interest_rate/historical/jgbcme_all.csv",
     "https://www.mof.go.jp/english/policy/jgbs/reference/interest_rate/jgbcme.csv",  # current month
@@ -105,51 +126,53 @@ def parse_mof_date(x: str) -> pd.Timestamp:
         return pd.NaT
 
 
-def parse_mof_csv(text: str) -> pd.Series:
+def parse_mof_csv(text: str) -> pd.DataFrame:
     lines = text.splitlines()
     header = next(i for i, l in enumerate(lines) if l.strip().lower().startswith("date"))
     df = pd.read_csv(StringIO("\n".join(lines[header:])), na_values=["-", ""],
                      on_bad_lines="skip")
     df.columns = [c.strip() for c in df.columns]
-    s = pd.to_numeric(df["10Y"], errors="coerce")
-    s.index = df[df.columns[0]].map(parse_mof_date)
-    s = s[s.index.notna()].dropna()  # keep only real dated rows with a 10y yield
-    if s.empty:
-        raise ValueError("Couldn't read any 10y yields from the MoF file, paste its first lines to debug")
-    return s
+    df.index = df[df.columns[0]].map(parse_mof_date)
+    df = df[df.index.notna()]
+    out = df[["2Y", "10Y"]].apply(pd.to_numeric, errors="coerce")
+    if out["10Y"].dropna().empty:
+        raise ValueError("Couldn't read any yields from the MoF file, paste its first lines to debug")
+    return out
 
 
-def load_jgb10y() -> pd.Series:
-    cache = DATA / "jgb10y.csv"
+def load_jgb() -> pd.DataFrame:
+    cache = DATA / "jgb_yields.csv"
     if REFRESH or not cache.exists():
         parts = []
         for url in MOF_URLS:
             with urllib.request.urlopen(url, timeout=30) as r:
                 parts.append(parse_mof_csv(r.read().decode("latin-1")))
-        s = pd.concat(parts).sort_index()
-        s = s[~s.index.duplicated(keep="last")]
-        s = s[s.index >= START]
-        s.rename("JGB10Y").to_csv(cache, index_label="Date")
-    return pd.read_csv(cache, index_col="Date", parse_dates=True)["JGB10Y"]
+        df = pd.concat(parts).sort_index()
+        df = df[~df.index.duplicated(keep="last")]
+        df = df[df.index >= START]
+        df.to_csv(cache, index_label="Date")
+    return pd.read_csv(cache, index_col="Date", parse_dates=True)
 
 
 # ---- Event-window maths ----------------------------------------------------
 def event_window(s: pd.Series, d: pd.Timestamp, kind: str) -> dict:
     """
     Moves around decision day d, using the series' OWN trading days
-    (JGBs skip Japanese holidays, FX doesn't).
-      day     t-1 -> t      the reaction
-      5d      t-1 -> t+4    reaction plus the following week
-      follow  t   -> t+4    what happened after day 0 only
+    (JGBs skip Japanese holidays, FX skips US holidays).
+      pre     t-1-PRE_DAYS -> t-1   the run-up, as expectations build
+      day     t-1 -> t              the reaction
+      5d      t-1 -> t+4            reaction plus the following week
+      follow  t   -> t+4            what happened after day 0 only
     kind="pct" gives % changes (FX), kind="bp" gives basis-point changes (yields).
     """
+    s = s.dropna()
     if d not in s.index:
         raise ValueError(f"{s.name}: no data on {d.date()}, check before trusting this row")
     i = s.index.get_loc(d)
-    if i < 1 or i + 4 >= len(s):
-        raise ValueError(f"{s.name}: not enough data around {d.date()} for a 5-day window")
+    if i - 1 - PRE_DAYS < 0 or i + 4 >= len(s):
+        raise ValueError(f"{s.name}: not enough data around {d.date()} for the windows")
 
-    before, day0, day4 = s.iloc[i - 1], s.iloc[i], s.iloc[i + 4]
+    start, before, day0, day4 = s.iloc[i - 1 - PRE_DAYS], s.iloc[i - 1], s.iloc[i], s.iloc[i + 4]
     if kind == "pct":
         chg = lambda a, b: (b / a - 1) * 100
         typical = (s.pct_change() * 100).rolling(20).std().shift(1).loc[d]
@@ -159,85 +182,115 @@ def event_window(s: pd.Series, d: pd.Timestamp, kind: str) -> dict:
 
     day = chg(before, day0)
     return {
+        "pre": chg(start, before),
         "day": day,
         "5d": chg(before, day4),
         "follow": chg(day0, day4),
         "z": day / typical,                 # day move in units of normal daily vol
-        "window_end": s.index[i + 4].date(),
     }
 
 
 # ---- Run ----------------------------------------------------------------------
 usdjpy = load_usdjpy()
-jgb = load_jgb10y()
+jgb = load_jgb()
+jgb2, jgb10 = jgb["2Y"].rename("JGB2Y"), jgb["10Y"].rename("JGB10Y")
 
 rows = []
-for _, h in hikes.iterrows():
-    d = h["Date"]
+for _, m in meetings.iterrows():
+    d = m["Date"]
     fx = event_window(usdjpy, d, "pct")
-    bond = event_window(jgb, d, "bp")
+    b2 = event_window(jgb2, d, "bp")
+    b10 = event_window(jgb10, d, "bp")
     rows.append({
         "Date": d.date(),
-        "Decision": h["Decision"],
-        "Hike (bp)": round((h["Rate after"] - h["Rate before"]) * 100),
+        "Decision": m["Decision"],
+        "Change (bp)": m["Change (bp)"],
+        "Policy rate after": m["Policy rate after"],
+        "USDJPY pre %": fx["pre"],
         "USDJPY day %": fx["day"],
         "USDJPY 5d %": fx["5d"],
         "USDJPY follow %": fx["follow"],
         "USDJPY day z": fx["z"],
-        "JGB10y day bp": bond["day"],
-        "JGB10y 5d bp": bond["5d"],
-        "JGB10y follow bp": bond["follow"],
-        "JGB10y day z": bond["z"],
-        "JGB window ends": bond["window_end"],
+        "JGB2y pre bp": b2["pre"],
+        "JGB2y day bp": b2["day"],
+        "JGB10y day bp": b10["day"],
+        "JGB10y 5d bp": b10["5d"],
+        "JGB10y follow bp": b10["follow"],
+        "JGB10y day z": b10["z"],
     })
 
 results = pd.DataFrame(rows)
 results["Yen on the day"] = results["USDJPY day %"].map(lambda x: "weaker" if x > 0 else "stronger")
 
-pd.set_option("display.width", 200)
-pd.set_option("display.max_columns", 20)
-print(results.round(2).to_string(index=False))
+pd.set_option("display.width", 250)
+pd.set_option("display.max_columns", 30)
+show = ["Date", "Decision", "Change (bp)", "USDJPY pre %", "USDJPY day %", "USDJPY 5d %", "USDJPY day z",
+        "JGB2y pre bp", "JGB2y day bp", "JGB10y day bp", "JGB10y 5d bp", "Yen on the day"]
+print(results[show].round(2).to_string(index=False))
+
+# Hikes vs holds: how big is the typical reaction? (absolute moves, so direction doesn't cancel out)
+summary = results.groupby("Decision").agg(
+    meetings=("Date", "count"),
+    yen_weaker_on_day=("USDJPY day %", lambda x: int((x > 0).sum())),
+    avg_abs_usdjpy_day_pct=("USDJPY day %", lambda x: x.abs().mean()),
+    avg_abs_usdjpy_day_z=("USDJPY day z", lambda x: x.abs().mean()),
+    avg_abs_jgb10y_day_bp=("JGB10y day bp", lambda x: x.abs().mean()),
+)
+print("\nHikes vs holds (averages of absolute moves):")
+print(summary.round(2).to_string())
 
 results.to_csv(OUT / "boj_event_study.csv", index=False)
 try:
-    results.to_excel(OUT / "boj_event_study.xlsx", index=False)
+    with pd.ExcelWriter(OUT / "boj_event_study.xlsx", engine="openpyxl") as xw:
+        for name, df in (("Event study", results), ("Hikes vs holds", summary.reset_index())):
+            df.to_excel(xw, index=False, sheet_name=name)
+            ws = xw.sheets[name]
+            for col in ws.columns:
+                width = max(len(str(c.value)) if c.value is not None else 0 for c in col)
+                ws.column_dimensions[col[0].column_letter].width = min(width + 2, 30)
+            ws.freeze_panes = "B2"
 except ImportError:
     print("openpyxl not installed, skipped Excel export (pip install openpyxl)")
 
 
 # ---- Chart ------------------------------------------------------------------
-# Two panels rather than one chart with two y-axes, because % and bp aren't comparable.
-INK, MUTED, GRID, BAR = "#0b0b0b", "#52514e", "#e4e3df", "#2a78d6"
-labels = [pd.Timestamp(d).strftime("%b %Y") for d in results["Date"]]
+# Two stacked panels (% and bp aren't comparable, so no shared axis). Hikes in blue, holds in grey.
+INK, MUTED, GRID, HIKE, HOLD = "#0b0b0b", "#52514e", "#e4e3df", "#2a78d6", "#b9b8b2"
+labels = [pd.Timestamp(d).strftime("%b %y") for d in results["Date"]]
+colors = [HIKE if dec == "Hike" else HOLD for dec in results["Decision"]]
 
-fig, axes = plt.subplots(1, 2, figsize=(11, 4.2))
+fig, axes = plt.subplots(2, 1, figsize=(11, 7.5), sharex=True)
 panels = [
     (axes[0], "USDJPY day %", "USD/JPY on decision day (%)", "Above zero = yen weaker", "{:+.2f}%"),
     (axes[1], "JGB10y day bp", "10y JGB yield on decision day (bp)", "Above zero = yields higher", "{:+.1f}"),
 ]
 for ax, col, title, note, fmt in panels:
     vals = results[col]
-    bars = ax.bar(labels, vals, color=BAR, width=0.55, zorder=2)
+    bars = ax.bar(labels, vals, color=colors, width=0.6, zorder=2)
     ax.axhline(0, color=MUTED, linewidth=1, zorder=3)
-    pad = (vals.abs().max() or 1) * 0.06
-    for b, v in zip(bars, vals):
-        ax.text(b.get_x() + b.get_width() / 2, v + (pad if v >= 0 else -pad), fmt.format(v),
-                ha="center", va="bottom" if v >= 0 else "top", fontsize=9, color=INK)
-    lim = vals.abs().max() * 1.3 or 1
+    lim = vals.abs().max() * 1.35 or 1
+    pad = lim * 0.04
+    for b, v, dec in zip(bars, vals, results["Decision"]):
+        if dec == "Hike":  # label only the hikes, so the labels don't crowd
+            ax.text(b.get_x() + b.get_width() / 2, v + (pad if v >= 0 else -pad), fmt.format(v),
+                    ha="center", va="bottom" if v >= 0 else "top", fontsize=8, color=INK)
     ax.set_ylim(-lim, lim)
-    ax.set_title(title, loc="left", fontsize=11, color=INK, fontweight="bold", pad=22)
-    ax.text(0, 1.025, note, transform=ax.transAxes, fontsize=8.5, color=MUTED, va="bottom")
+    ax.set_title(title, loc="left", fontsize=11, color=INK, fontweight="bold", pad=20)
+    ax.text(0, 1.02, note, transform=ax.transAxes, fontsize=8.5, color=MUTED, va="bottom")
     ax.grid(axis="y", color=GRID, linewidth=0.8, zorder=0)
-    ax.tick_params(colors=MUTED, labelsize=9, length=0)
+    ax.tick_params(colors=MUTED, labelsize=8, length=0)
     for side in ("top", "right", "left"):
         ax.spines[side].set_visible(False)
     ax.spines["bottom"].set_color(GRID)
+axes[1].tick_params(axis="x", rotation=60)
+axes[0].legend(handles=[Patch(color=HIKE, label="Hike"), Patch(color=HOLD, label="Hold")],
+               loc="upper right", frameon=False, fontsize=9, ncol=2, bbox_to_anchor=(1, 1.22))
 
-fig.suptitle("Market reaction to each Bank of Japan rate hike since March 2024",
+fig.suptitle("Market reaction to every Bank of Japan decision since March 2024",
              x=0.01, ha="left", fontsize=13, color=INK, fontweight="bold")
 fx_src = "Federal Reserve H.10 (USD/JPY, noon New York)" if FX_SOURCE == "fred" else "Yahoo Finance (USD/JPY)"
 fig.text(0.01, 0.01, f"Sources: {fx_src}, Japan Ministry of Finance (10y JGB, Tokyo close). "
          "Move = decision day vs previous day.", fontsize=7.5, color=MUTED)
-fig.tight_layout(rect=(0, 0.04, 1, 0.93))
+fig.tight_layout(rect=(0, 0.03, 1, 0.95))
 fig.savefig(OUT / "boj_day_moves.png", dpi=200)
 print(f"\nSaved results and chart to {OUT}")
