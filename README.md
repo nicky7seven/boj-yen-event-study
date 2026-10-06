@@ -2,7 +2,9 @@
 
 An event study of USD/JPY and Japanese government bond (JGB) yields around every Bank of Japan policy meeting since the end of negative interest rates in March 2024. That's 21 meetings, 6 hikes and 15 holds.
 
-**Status** Step 1 (measuring the market reaction to every meeting) is complete. Step 2 (recording what markets expected before each meeting and the tone of each decision) is in progress, alongside a short research note with a trade idea.
+**Status** Step 1 (measuring the market reaction to every meeting) is complete. Step 2 (recording what markets expected before each meeting and the tone of each decision) is in progress, alongside a short research note with a trade idea. Complete.
+
+**Research note** [Read the full research note (PDF)](BoJ_yen_research_note.pdf)
 
 ## The puzzle
 
